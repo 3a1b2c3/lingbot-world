@@ -110,7 +110,7 @@ We provide comparison demos where camera parameters are estimated by [ViPE](http
 
 ## 📚 Related Projects
 - [HoloCine](https://holo-cine.github.io/)
-- [Ditto](https://editto.net/)
+- [Ditto](https://ezioby.github.io/Ditto_page/)
 - [WorldCanvas](https://worldcanvas.github.io/)
 - [RewardForcing](https://reward-forcing.github.io/)
 - [CoDeF](https://qiuyu96.github.io/CoDeF/)
