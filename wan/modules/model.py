@@ -320,6 +320,7 @@ class WanModel(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(self,
                  model_type='t2v',
+                 control_type='cam',
                  patch_size=(1, 2, 2),
                  text_len=512,
                  in_dim=16,
@@ -390,11 +391,16 @@ class WanModel(ModelMixin, ConfigMixin):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
 
+        if control_type == 'cam':
+            control_dim = 6
+        elif control_type == 'act':
+            control_dim = 7
+
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
         self.patch_embedding_wancamctrl = nn.Linear(
-            6 * 64 * patch_size[0] * patch_size[1] * patch_size[2], dim)
+            control_dim * 64 * patch_size[0] * patch_size[1] * patch_size[2], dim)
         self.c2ws_hidden_states_layer1 = nn.Linear(dim, dim)
         self.c2ws_hidden_states_layer2 = nn.Linear(dim, dim)
         self.text_embedding = nn.Sequential(

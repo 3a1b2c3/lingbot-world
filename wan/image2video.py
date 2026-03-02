@@ -90,6 +90,11 @@ class WanI2V:
         if t5_fsdp or dit_fsdp or use_sp:
             self.init_on_cpu = False
 
+        if 'cam' in checkpoint_dir:
+            self.control_type = 'cam'
+        elif 'act' in checkpoint_dir:
+            self.control_type = 'act'
+
         shard_fn = partial(shard_model, device_id=device_id)
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
@@ -108,7 +113,7 @@ class WanI2V:
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.low_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.low_noise_checkpoint, torch_dtype=torch.bfloat16)
+            checkpoint_dir, subfolder=config.low_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
         self.low_noise_model = self._configure_model(
             model=self.low_noise_model,
             use_sp=use_sp,
@@ -117,7 +122,7 @@ class WanI2V:
             convert_model_dtype=convert_model_dtype)
 
         self.high_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.high_noise_checkpoint, torch_dtype=torch.bfloat16)
+            checkpoint_dir, subfolder=config.high_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
         self.high_noise_model = self._configure_model(
             model=self.high_noise_model,
             use_sp=use_sp,
@@ -265,6 +270,10 @@ class WanI2V:
             len_c2ws = ((len(c2ws) - 1) // 4) * 4 + 1
             frame_num = min(frame_num, len_c2ws)
             c2ws = c2ws[:frame_num]
+            if self.control_type == 'act':
+                # In 'act' mode, use rotation of c2ws to control orientation and wasd_action to drive movement.
+                wasd_action = np.load(os.path.join(action_path, "action.npy")) # wasd action
+                wasd_action = wasd_action[:frame_num]
 
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
@@ -351,7 +360,12 @@ class WanI2V:
 
             c2ws_infer = c2ws_infer.to(self.device)
             Ks = Ks.to(self.device)
-            c2ws_plucker_emb = get_plucker_embeddings(c2ws_infer, Ks, h, w)
+            if self.control_type == 'act':
+                wasd_action = torch.from_numpy(wasd_action[::4]).float().to(self.device)
+            else:
+                wasd_action = None
+            only_rays_d = wasd_action is not None
+            c2ws_plucker_emb = get_plucker_embeddings(c2ws_infer, Ks, h, w, only_rays_d=only_rays_d)
             c2ws_plucker_emb = rearrange(
                 c2ws_plucker_emb,
                 'f (h c1) (w c2) c -> (f h w) (c c1 c2)',
@@ -360,6 +374,17 @@ class WanI2V:
             )
             c2ws_plucker_emb = c2ws_plucker_emb[None, ...] # [b, f*h*w, c]
             c2ws_plucker_emb = rearrange(c2ws_plucker_emb, 'b (f h w) c -> b c f h w', f=lat_f, h=lat_h, w=lat_w).to(self.param_dtype)
+            if wasd_action is not None:
+                wasd_action_tensor = wasd_action[:, None, None, :].repeat(1, h, w, 1) # [f, h, w, 3]
+                wasd_action_tensor = rearrange(
+                    wasd_action_tensor,
+                    'f (h c1) (w c2) c -> (f h w) (c c1 c2)',
+                    c1=int(h // lat_h),
+                    c2=int(w // lat_w),
+                )
+                wasd_action_tensor = wasd_action_tensor[None, ...] # [b, f*h*w, c]
+                wasd_action_tensor = rearrange(wasd_action_tensor, 'b (f h w) c -> b c f h w', f=lat_f, h=lat_h, w=lat_w).to(self.param_dtype)
+                c2ws_plucker_emb = torch.cat([c2ws_plucker_emb, wasd_action_tensor], dim=1)
             dit_cond_dict = {
                 "c2ws_plucker_emb": c2ws_plucker_emb.chunk(1, dim=0),
             }
