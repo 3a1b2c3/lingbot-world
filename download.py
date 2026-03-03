@@ -4,7 +4,7 @@ from huggingface_hub import snapshot_download
 if __name__ == "__main__":
     # Available models
     MODELS = {
-        "base-cam": "robbyant/lingbot-world-base-cam",
+        #"base-cam": "robbyant/lingbot-world-base-cam",
         "base-cam-nf4": "cahlen/lingbot-world-base-cam-nf4",
         "base-act": "robbyant/lingbot-world-base-act"
     }

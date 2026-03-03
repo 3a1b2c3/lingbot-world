@@ -101,8 +101,8 @@ def _parse_args():
     parser.add_argument(
         "--frame_num",
         type=int,
-        default=None,
-        help="How many frames of video are generated. The number should be 4n+1"
+        default=81,
+        help="How many frames of video are generated. The number should be 4n+1 (default: 81)"
     )
     parser.add_argument(
         "--ckpt_dir",
@@ -205,7 +205,7 @@ def _parse_args():
         default=False,
         help="Whether to convert model paramerters dtype.")
     # ---- VBench batch args ----
-    parser.add_argument("--vbench", action="store_true", default=False,
+    parser.add_argument("--vbench", action="store_true", default=True,
         help="Run VBench batch generation instead of single-video mode.")
     parser.add_argument("--image_types", type=str, default="indoor,scenery",
         help="Comma-separated image_type values to include (default: scenery,indoor).")
@@ -221,7 +221,9 @@ def _parse_args():
         help="Crop resolution subfolder.")
 
     args = parser.parse_args()
-    if not args.vbench:
+    if args.vbench:
+        assert args.ckpt_dir is not None, "Please specify --ckpt_dir (path to Wan checkpoint directory)."
+    else:
         _validate_args(args)
 
     return args
@@ -415,6 +417,11 @@ def vbench_batch(args):
     )
 
     skipped = generated = errors = 0
+    total   = len(prompts) * args.num_samples
+    done    = 0
+    t_start = time.time()
+    print(f'[vbench] {len(prompts)} prompts × {args.num_samples} samples = {total} total')
+
     for task_idx, (image_name, prompt) in enumerate(prompts):
         image_path = os.path.join(image_dir, image_name)
         if not os.path.isfile(image_path):
@@ -426,13 +433,18 @@ def vbench_batch(args):
         for sample_idx in range(args.num_samples):
             out_path = os.path.join(out_dir, f'{_safe(prompt)}-{sample_idx}.mp4')
             if os.path.exists(out_path):
-                print(f'[vbench] skip  {task_idx+1}/{len(prompts)} sample {sample_idx}: {prompt[:50]}')
                 skipped += 1
+                done += 1
                 stats_w.writerow([task_idx, prompt, sample_idx, '', '', out_path, 'skipped'])
                 stats_f.flush()
                 continue
 
-            print(f'[vbench] run   {task_idx+1}/{len(prompts)} sample {sample_idx+1}/{args.num_samples}: {prompt[:60]}')
+            pct = 100 * done / total if total else 0
+            eta = ''
+            if done > 0:
+                secs_left = (time.time() - t_start) / done * (total - done)
+                eta = f'  ETA {int(secs_left//3600):02d}h{int(secs_left%3600//60):02d}m{int(secs_left%60):02d}s'
+            print(f'[vbench] [{done+1}/{total}  {pct:.0f}%{eta}]  prompt {task_idx+1}/{len(prompts)}  sample {sample_idx+1}/{args.num_samples}: {prompt[:50]}')
             seed = args.base_seed + sample_idx
             try:
                 with torch.inference_mode():
@@ -440,7 +452,7 @@ def vbench_batch(args):
                     video = wan_i2v.generate(
                         prompt, img,
                         max_area=MAX_AREA_CONFIGS[args.size],
-                        frame_num=args.frame_num or 81,
+                        frame_num=args.frame_num,
                         shift=args.sample_shift or cfg.sample_shift,
                         sample_solver=args.sample_solver,
                         sampling_steps=args.sample_steps or cfg.sample_steps,
@@ -449,7 +461,7 @@ def vbench_batch(args):
                         offload_model=True,
                     )
                     elapsed = time.time() - t0
-                frame_num = args.frame_num or 81
+                frame_num = args.frame_num
                 gen_fps = frame_num / elapsed if elapsed > 0 else 0.0
                 from wan.utils.utils import save_video as _save_video
                 _save_video(tensor=video[None], save_file=out_path, fps=cfg.sample_fps,
@@ -463,9 +475,11 @@ def vbench_batch(args):
                 stats_w.writerow([task_idx, prompt, sample_idx, '', '', out_path, 'error'])
                 stats_f.flush()
                 errors += 1
+            done += 1
 
+    elapsed_total = time.time() - t_start
     stats_f.close()
-    print(f'\n[vbench] done — generated={generated}  skipped={skipped}  errors={errors}')
+    print(f'\n[vbench] done — generated={generated}  skipped={skipped}  errors={errors}  elapsed={elapsed_total/60:.1f}m')
     print(f'[vbench] stats → {stats_path}')
 
 
