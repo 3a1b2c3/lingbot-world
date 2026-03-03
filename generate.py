@@ -190,11 +190,65 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to convert model paramerters dtype.")
-    
+    parser.add_argument(
+        "--overlay_actions",
+        action="store_true",
+        default=False,
+        help="Draw WASD key state overlay on output frames (requires --action_path).")
+
     args = parser.parse_args()
     _validate_args(args)
 
     return args
+
+
+def _apply_action_overlay(video, action_data):
+    """Draw WASD key state overlay on each frame.
+
+    Args:
+        video:       tensor [C, F, H, W] in range [-1, 1]
+        action_data: ndarray [N, 4] binary int — columns map to W, A, S, D
+
+    Returns:
+        tensor [C, F, H, W] in range [-1, 1]
+    """
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    # [C,F,H,W] -> [F,H,W,C] uint8
+    frames = ((video.permute(1, 2, 3, 0).clamp(-1, 1) + 1) * 127.5).byte().cpu().numpy()
+    F = frames.shape[0]
+    indices = (np.linspace(0, len(action_data) - 1, F) + 0.5).astype(int).clip(0, len(action_data) - 1)
+
+    sz, gap = 28, 4  # key box size and gap
+    x0, y0 = 10, 10
+    # WASD cross layout:
+    #     [W]
+    # [A][S][D]
+    key_positions = [
+        ('W', x0 + sz + gap,       y0),
+        ('A', x0,                   y0 + sz + gap),
+        ('S', x0 + sz + gap,        y0 + sz + gap),
+        ('D', x0 + 2 * (sz + gap),  y0 + sz + gap),
+    ]
+
+    result = []
+    for i, frame in enumerate(frames):
+        img = Image.fromarray(frame)
+        draw = ImageDraw.Draw(img, 'RGBA')
+        acts = action_data[indices[i]]
+        for k, (label, kx, ky) in enumerate(key_positions):
+            pressed = bool(acts[k]) if k < len(acts) else False
+            fill = (255, 220, 0, 210) if pressed else (40, 40, 40, 160)
+            text_col = (0, 0, 0, 255) if pressed else (150, 150, 150, 255)
+            draw.rounded_rectangle([kx, ky, kx + sz, ky + sz], radius=4, fill=fill)
+            bbox = draw.textbbox((0, 0), label)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((kx + (sz - tw) // 2, ky + (sz - th) // 2 - 1), label, fill=text_col)
+        result.append(np.array(img))
+
+    out = torch.from_numpy(np.stack(result)).float()  # [F, H, W, C]
+    return (out / 127.5 - 1).permute(3, 0, 1, 2)     # [C, F, H, W]
 
 
 def _init_logging(rank):
@@ -297,6 +351,11 @@ def generate(args):
         offload_model=args.offload_model)
 
     if rank == 0:
+        if args.overlay_actions and args.action_path is not None:
+            import numpy as np
+            action_data = np.load(os.path.join(args.action_path, "action.npy"))
+            video = _apply_action_overlay(video, action_data)
+
         if args.save_file is None:
             formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
             formatted_prompt = args.prompt.replace(" ", "_").replace("/",
