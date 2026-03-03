@@ -40,7 +40,6 @@ def main():
         args.src,
         quantization_config=nf4_config,
         torch_dtype=torch.bfloat16,
-        device_map="auto",
     )
 
     print(f"Saving NF4 model to {args.dst} ...")
