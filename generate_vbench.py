@@ -1,6 +1,8 @@
 import argparse
+import json
 import logging
 import os
+import re
 import sys
 import warnings
 from datetime import datetime
@@ -20,6 +22,14 @@ import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
 from wan.utils.utils import merge_video_audio, save_video, str2bool
+
+
+_SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
+_VBENCH_ROOT       = os.path.join(_SCRIPT_DIR, "..", "VBench", "vbench2_beta_i2v")
+_DEFAULT_INFO_JSON = os.path.join(_VBENCH_ROOT, "vbench2_i2v_full_info.json")
+_DEFAULT_CROP_DIR  = os.path.join(_VBENCH_ROOT, "vbench2_beta_i2v", "data", "crop")
+def _safe(s):
+    return re.sub(r'[<>:"/\\|?*]', "_", s)[:150]
 
 
 EXAMPLE_PROMPT = {
@@ -192,9 +202,25 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to convert model paramerters dtype.")
-    
+    # ---- VBench batch args ----
+    parser.add_argument("--vbench", action="store_true", default=False,
+        help="Run VBench batch generation instead of single-video mode.")
+    parser.add_argument("--image_types", type=str, default="indoor,scenery",
+        help="Comma-separated image_type values to include (default: scenery,indoor).")
+    parser.add_argument("--vbench_output_dir", type=str, default="results_vbench/videos",
+        help="Output directory for vbench videos.")
+    parser.add_argument("--num_samples", type=int, default=5,
+        help="Number of samples per prompt.")
+    parser.add_argument("--vbench_info_json", type=str, default=None,
+        help="Path to vbench2_i2v_full_info.json.")
+    parser.add_argument("--crop_dir", type=str, default=None,
+        help="Path to VBench crop directory.")
+    parser.add_argument("--resolution", type=str, default="1-1",
+        help="Crop resolution subfolder.")
+
     args = parser.parse_args()
-    _validate_args(args)
+    if not args.vbench:
+        _validate_args(args)
 
     return args
 
@@ -339,6 +365,94 @@ def generate(args):
     logging.info("Generation process finished.")
 
 
+def vbench_batch(args):
+    info_json = os.path.abspath(args.vbench_info_json or _DEFAULT_INFO_JSON)
+    crop_base = os.path.abspath(args.crop_dir or _DEFAULT_CROP_DIR)
+    image_dir = os.path.join(crop_base, args.resolution)
+    out_dir   = os.path.abspath(args.vbench_output_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    if not os.path.isfile(info_json):
+        print(f'[vbench] ERROR: info JSON not found: {info_json}'); return
+    if not os.path.isdir(image_dir):
+        print(f'[vbench] ERROR: crop dir not found: {image_dir}'); return
+
+    with open(info_json, encoding='utf-8') as f:
+        entries = json.load(f)
+
+    allowed  = {t.strip() for t in args.image_types.split(',') if t.strip()} if args.image_types else None
+    populate = None
+
+    seen, prompts = set(), []
+    for e in entries:
+        name = e['image_name']
+        if name in seen: continue
+        if allowed and e.get('image_type') not in allowed: continue
+        if populate is not None and (e.get('image_type') in _POPULATED_TYPES) != populate: continue
+        seen.add(name)
+        prompts.append((name, e['prompt_en']))
+
+    print(f'[vbench] {len(prompts)} prompts × {args.num_samples} samples = {len(prompts) * args.num_samples} total')
+
+    cfg = WAN_CONFIGS[args.task]
+    wan_i2v = wan.WanI2V(
+        config=cfg,
+        checkpoint_dir=args.ckpt_dir,
+        device_id=0,
+        rank=0,
+        t5_fsdp=False,
+        dit_fsdp=False,
+        use_sp=False,
+        t5_cpu=args.t5_cpu,
+        convert_model_dtype=args.convert_model_dtype,
+    )
+
+    skipped = generated = errors = 0
+    for task_idx, (image_name, prompt) in enumerate(prompts):
+        image_path = os.path.join(image_dir, image_name)
+        if not os.path.isfile(image_path):
+            print(f'[vbench] skip {task_idx}: image not found — {image_path}')
+            continue
+
+        img = Image.open(image_path).convert("RGB")
+
+        for sample_idx in range(args.num_samples):
+            out_path = os.path.join(out_dir, f'{_safe(prompt)}-{sample_idx}.mp4')
+            if os.path.exists(out_path):
+                print(f'[vbench] skip  {task_idx+1}/{len(prompts)} sample {sample_idx}: {prompt[:50]}')
+                skipped += 1
+                continue
+
+            print(f'[vbench] run   {task_idx+1}/{len(prompts)} sample {sample_idx+1}/{args.num_samples}: {prompt[:60]}')
+            seed = args.base_seed + sample_idx
+            try:
+                with torch.inference_mode():
+                    video = wan_i2v.generate(
+                        prompt, img,
+                        max_area=MAX_AREA_CONFIGS[args.size],
+                        frame_num=args.frame_num or cfg.frame_num,
+                        shift=args.sample_shift or cfg.sample_shift,
+                        sample_solver=args.sample_solver,
+                        sampling_steps=args.sample_steps or cfg.sample_steps,
+                        guide_scale=args.sample_guide_scale or cfg.sample_guide_scale,
+                        seed=seed,
+                        offload_model=True,
+                    )
+                from wan.utils.utils import save_video as _save_video
+                _save_video(tensor=video[None], save_file=out_path, fps=cfg.sample_fps,
+                            nrow=1, normalize=True, value_range=(-1, 1))
+                print(f'[vbench] saved {out_path}')
+                generated += 1
+            except Exception as exc:
+                print(f'[vbench] ERROR task {task_idx} sample {sample_idx}: {exc}')
+                errors += 1
+
+    print(f'\n[vbench] done — generated={generated}  skipped={skipped}  errors={errors}')
+
+
 if __name__ == "__main__":
     args = _parse_args()
-    generate(args)
+    if args.vbench:
+        vbench_batch(args)
+    else:
+        generate(args)
