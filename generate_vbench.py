@@ -1,9 +1,11 @@
 import argparse
+import csv
 import json
 import logging
 import os
 import re
 import sys
+import time
 import warnings
 from datetime import datetime
 
@@ -372,6 +374,11 @@ def vbench_batch(args):
     out_dir   = os.path.abspath(args.vbench_output_dir)
     os.makedirs(out_dir, exist_ok=True)
 
+    stats_path = os.path.join(os.path.dirname(out_dir), 'vbench_stats.csv')
+    stats_f    = open(stats_path, 'w', newline='', encoding='utf-8')
+    stats_w    = csv.writer(stats_f)
+    stats_w.writerow(['task_idx', 'prompt', 'sample_idx', 'duration_s', 'gen_fps', 'out_path', 'status'])
+
     if not os.path.isfile(info_json):
         print(f'[vbench] ERROR: info JSON not found: {info_json}'); return
     if not os.path.isdir(image_dir):
@@ -421,16 +428,19 @@ def vbench_batch(args):
             if os.path.exists(out_path):
                 print(f'[vbench] skip  {task_idx+1}/{len(prompts)} sample {sample_idx}: {prompt[:50]}')
                 skipped += 1
+                stats_w.writerow([task_idx, prompt, sample_idx, '', '', out_path, 'skipped'])
+                stats_f.flush()
                 continue
 
             print(f'[vbench] run   {task_idx+1}/{len(prompts)} sample {sample_idx+1}/{args.num_samples}: {prompt[:60]}')
             seed = args.base_seed + sample_idx
             try:
                 with torch.inference_mode():
+                    t0 = time.time()
                     video = wan_i2v.generate(
                         prompt, img,
                         max_area=MAX_AREA_CONFIGS[args.size],
-                        frame_num=args.frame_num or cfg.frame_num,
+                        frame_num=args.frame_num or 81,
                         shift=args.sample_shift or cfg.sample_shift,
                         sample_solver=args.sample_solver,
                         sampling_steps=args.sample_steps or cfg.sample_steps,
@@ -438,16 +448,25 @@ def vbench_batch(args):
                         seed=seed,
                         offload_model=True,
                     )
+                    elapsed = time.time() - t0
+                frame_num = args.frame_num or 81
+                gen_fps = frame_num / elapsed if elapsed > 0 else 0.0
                 from wan.utils.utils import save_video as _save_video
                 _save_video(tensor=video[None], save_file=out_path, fps=cfg.sample_fps,
                             nrow=1, normalize=True, value_range=(-1, 1))
-                print(f'[vbench] saved {out_path}')
+                print(f'[vbench] saved {out_path}  ({gen_fps:.1f} gen-fps)')
+                stats_w.writerow([task_idx, prompt, sample_idx, f'{elapsed:.2f}', f'{gen_fps:.2f}', out_path, 'ok'])
+                stats_f.flush()
                 generated += 1
             except Exception as exc:
                 print(f'[vbench] ERROR task {task_idx} sample {sample_idx}: {exc}')
+                stats_w.writerow([task_idx, prompt, sample_idx, '', '', out_path, 'error'])
+                stats_f.flush()
                 errors += 1
 
+    stats_f.close()
     print(f'\n[vbench] done — generated={generated}  skipped={skipped}  errors={errors}')
+    print(f'[vbench] stats → {stats_path}')
 
 
 if __name__ == "__main__":
