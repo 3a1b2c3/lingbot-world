@@ -65,9 +65,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
+        nargs="+",
         choices=list(MODELS.keys()),
-        default="base-cam",
-        help=f"Model to download. Available options: {', '.join(MODELS.keys())} (default: base-cam)"
+        default=["base-act", "base-cam-nf4"],
+        help=f"Model(s) to download. Available options: {', '.join(MODELS.keys())} (default: base-act base-cam-nf4)"
     )
     parser.add_argument(
         "--local-dir",
@@ -78,16 +79,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Get the repository ID from the selected model
-    repo_id = MODELS[args.model]
+    for model in args.model:
+        repo_id = MODELS[model]
+        local_dir = args.local_dir if args.local_dir else f"./{model}"
 
-    # Set local directory (use model name if not specified)
-    local_dir = args.local_dir if args.local_dir else f"./{args.model}"
+        print(f"Downloading model: {model}")
+        print(f"Repository: {repo_id}")
+        print(f"Local directory: {local_dir}")
+        print()
 
-    print(f"Downloading model: {args.model}")
-    print(f"Repository: {repo_id}")
-    print(f"Local directory: {local_dir}")
-    print()
-
-    # Download all files from the repository
-    download_all_files(repo_id, local_dir)
+        download_all_files(repo_id, local_dir)
