@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 import warnings
 from datetime import datetime
 
@@ -324,7 +325,8 @@ def generate(args):
         args.prompt = input_prompt[0]
         logging.info(f"Extended prompt: {args.prompt}")
     
-    logging.info("Creating WanI2V pipeline.")
+    logging.info(f"Creating WanI2V pipeline from {args.ckpt_dir} ...")
+    _t0 = time.time()
     wan_i2v = wan.WanI2V(
         config=cfg,
         checkpoint_dir=args.ckpt_dir,
@@ -336,7 +338,8 @@ def generate(args):
         t5_cpu=args.t5_cpu,
         convert_model_dtype=args.convert_model_dtype,
     )
-    logging.info("Generating video ...")
+    logging.info(f"Pipeline ready in {time.time()-_t0:.1f}s")
+    logging.info(f"Generating video ({args.frame_num} frames, {args.sample_steps} steps) ...")
     video = wan_i2v.generate(
         args.prompt,
         img,

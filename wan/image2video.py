@@ -14,6 +14,7 @@ import torch.cuda.amp as amp
 import torch.distributed as dist
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from .distributed.fsdp import shard_model
 from .distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
@@ -96,6 +97,7 @@ class WanI2V:
             self.control_type = 'act'
 
         shard_fn = partial(shard_model, device_id=device_id)
+        logging.info("Loading T5 encoder ...")
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -107,28 +109,36 @@ class WanI2V:
 
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
+        logging.info("Loading VAE ...")
         self.vae = Wan2_1_VAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
 
-        logging.info(f"Creating WanModel from {checkpoint_dir}")
-        self.low_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.low_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
-        self.low_noise_model = self._configure_model(
-            model=self.low_noise_model,
-            use_sp=use_sp,
-            dit_fsdp=dit_fsdp,
-            shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+        import torch.nn as nn
+        _orig_reset = nn.Linear.reset_parameters
+        nn.Linear.reset_parameters = lambda self: None
+        try:
+            logging.info(f"Loading low_noise_model from {checkpoint_dir}/{config.low_noise_checkpoint} ...")
+            self.low_noise_model = WanModel.from_pretrained(
+                checkpoint_dir, subfolder=config.low_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
+            self.low_noise_model = self._configure_model(
+                model=self.low_noise_model,
+                use_sp=use_sp,
+                dit_fsdp=dit_fsdp,
+                shard_fn=shard_fn,
+                convert_model_dtype=convert_model_dtype)
 
-        self.high_noise_model = WanModel.from_pretrained(
-            checkpoint_dir, subfolder=config.high_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
-        self.high_noise_model = self._configure_model(
-            model=self.high_noise_model,
-            use_sp=use_sp,
-            dit_fsdp=dit_fsdp,
-            shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            logging.info(f"Loading high_noise_model from {checkpoint_dir}/{config.high_noise_checkpoint} ...")
+            self.high_noise_model = WanModel.from_pretrained(
+                checkpoint_dir, subfolder=config.high_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
+            self.high_noise_model = self._configure_model(
+                model=self.high_noise_model,
+                use_sp=use_sp,
+                dit_fsdp=dit_fsdp,
+                shard_fn=shard_fn,
+                convert_model_dtype=convert_model_dtype)
+        finally:
+            nn.Linear.reset_parameters = _orig_reset
         if use_sp:
             self.sp_size = get_world_size()
         else:
@@ -180,15 +190,15 @@ class WanI2V:
 
         return model
 
-    def _prepare_model_for_timestep(self, t, boundary, offload_model):
+    def _prepare_model_for_timestep(self, t_val, boundary, offload_model):
         r"""
         Prepares and returns the required model for the current timestep.
 
         Args:
-            t (torch.Tensor):
-                current timestep.
+            t_val (float):
+                current timestep value (pre-computed via t.item()).
             boundary (`int`):
-                The timestep threshold. If `t` is at or above this value,
+                The timestep threshold. If `t_val` is at or above this value,
                 the `high_noise_model` is considered as the required model.
             offload_model (`bool`):
                 A flag intended to control the offloading behavior.
@@ -197,7 +207,7 @@ class WanI2V:
             torch.nn.Module:
                 The active model on the target device for the current timestep.
         """
-        if t.item() >= boundary:
+        if t_val >= boundary:
             required_model_name = 'high_noise_model'
             offload_model_name = 'low_noise_model'
         else:
@@ -282,6 +292,7 @@ class WanI2V:
 
         F = frame_num
         h, w = img.shape[1:]
+        logging.info(f"Input: {F} frames  image {img.shape[1]}×{img.shape[2]}")
         aspect_ratio = h / w
         lat_h = round(
             np.sqrt(max_area * aspect_ratio) // self.vae_stride[1] //
@@ -321,6 +332,7 @@ class WanI2V:
             n_prompt = self.sample_neg_prompt
 
         # preprocess
+        logging.info("Encoding prompt with T5 ...")
         if not self.t5_cpu:
             self.text_encoder.model.to(self.device)
             context = self.text_encoder([input_prompt], self.device)
@@ -336,6 +348,7 @@ class WanI2V:
         # cam preparation (only if action_path is provided)
         dit_cond_dict = None
         if action_path is not None:
+            logging.info(f"Preparing {'action' if self.control_type == 'act' else 'camera'} embeddings ...")
             Ks = torch.from_numpy(np.load(os.path.join(action_path, "intrinsics.npy"))).float()
 
             # The provided intrinsics are for original image size (480p). We need to transform them according to the new image size (h, w).
@@ -389,14 +402,13 @@ class WanI2V:
                 "c2ws_plucker_emb": c2ws_plucker_emb.chunk(1, dim=0),
             }
 
+        logging.info(f"VAE encoding image  (lat {lat_f}×{lat_h}×{lat_w}) ...")
         y = self.vae.encode([
             torch.concat([
                 torch.nn.functional.interpolate(
-                    img[None].cpu(), size=(h, w), mode='bicubic').transpose(
-                        0, 1),
-                torch.zeros(3, F - 1, h, w)
-            ],
-                         dim=1).to(self.device)
+                    img[None], size=(h, w), mode='bicubic').transpose(0, 1),
+                torch.zeros(3, F - 1, h, w, device=self.device)
+            ], dim=1)
         ])[0]
         y = torch.concat([msk, y])
 
@@ -442,55 +454,54 @@ class WanI2V:
             # sample videos
             latent = noise
 
-            arg_c = {
-                'context': [context[0]],
+            # Build batched cond+uncond args once (camera emb [1,seq,C] broadcasts over batch=2)
+            arg_batched = {
+                'context': [context[0], context_null[0]],
                 'seq_len': max_seq_len,
-                'y': [y],
-                'dit_cond_dict': dit_cond_dict,
-            }
-
-            arg_null = {
-                'context': context_null,
-                'seq_len': max_seq_len,
-                'y': [y],
+                'y': [y, y],
                 'dit_cond_dict': dit_cond_dict,
             }
 
             if offload_model:
                 torch.cuda.empty_cache()
 
-            for _, t in enumerate(tqdm(timesteps)):
-                latent_model_input = [latent.to(self.device)]
-                timestep = [t]
+            logging.info(f"Denoising  ({sampling_steps} steps, solver={sample_solver}) ...")
+            pbar = tqdm(timesteps, desc='Denoise', dynamic_ncols=True)
+            with logging_redirect_tqdm():
+                for _, t in enumerate(pbar):
+                    _t_val = t.item()
+                    _model_name = 'high' if _t_val >= boundary else 'low'
+                    pbar.set_postfix(t=f'{_t_val:.0f}', model=_model_name)
 
-                timestep = torch.stack(timestep).to(self.device)
+                    latent_on_device = latent.to(self.device)
+                    timestep = torch.stack([t]).to(self.device)
 
-                model = self._prepare_model_for_timestep(
-                    t, boundary, offload_model)
-                sample_guide_scale = guide_scale[1] if t.item(
-                ) >= boundary else guide_scale[0]
+                    model = self._prepare_model_for_timestep(
+                        _t_val, boundary, offload_model)
+                    sample_guide_scale = guide_scale[1] if _t_val >= boundary else guide_scale[0]
 
-                noise_pred_cond = model(
-                    latent_model_input, t=timestep, **arg_c)[0]
-                if offload_model:
-                    torch.cuda.empty_cache()
-                noise_pred_uncond = model(
-                    latent_model_input, t=timestep, **arg_null)[0]
-                if offload_model:
-                    torch.cuda.empty_cache()
-                noise_pred = noise_pred_uncond + sample_guide_scale * (
-                    noise_pred_cond - noise_pred_uncond)
+                    # Single batched forward for cond + uncond
+                    noise_preds = model(
+                        [latent_on_device, latent_on_device],
+                        t=timestep.expand(2),
+                        **arg_batched)
+                    noise_pred_cond   = noise_preds[0]
+                    noise_pred_uncond = noise_preds[1]
+                    if offload_model:
+                        torch.cuda.empty_cache()
+                    noise_pred = noise_pred_uncond + sample_guide_scale * (
+                        noise_pred_cond - noise_pred_uncond)
 
-                temp_x0 = sample_scheduler.step(
-                    noise_pred.unsqueeze(0),
-                    t,
-                    latent.unsqueeze(0),
-                    return_dict=False,
-                    generator=seed_g)[0]
-                latent = temp_x0.squeeze(0)
+                    temp_x0 = sample_scheduler.step(
+                        noise_pred.unsqueeze(0),
+                        t,
+                        latent.unsqueeze(0),
+                        return_dict=False,
+                        generator=seed_g)[0]
+                    latent = temp_x0.squeeze(0)
 
-                x0 = [latent]
-                del latent_model_input, timestep
+                    x0 = [latent]
+                    del latent_on_device, timestep
 
             if offload_model:
                 self.low_noise_model.cpu()
@@ -498,6 +509,7 @@ class WanI2V:
                 torch.cuda.empty_cache()
 
             if self.rank == 0:
+                logging.info("VAE decoding latents ...")
                 videos = self.vae.decode(x0)
 
         del noise, latent, x0

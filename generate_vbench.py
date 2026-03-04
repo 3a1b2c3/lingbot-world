@@ -94,14 +94,14 @@ def _parse_args():
     parser.add_argument(
         "--size",
         type=str,
-        default="1280*720",
+        default="720*1280",
         choices=list(SIZE_CONFIGS.keys()),
         help="The area (width*height) of the generated video. For the I2V task, the aspect ratio of the output video will follow that of the input image."
     )
     parser.add_argument(
         "--frame_num",
         type=int,
-        default=81,
+        default=161,
         help="How many frames of video are generated. The number should be 4n+1 (default: 81)"
     )
     parser.add_argument(
@@ -188,7 +188,7 @@ def _parse_args():
         choices=['unipc', 'dpm++'],
         help="The solver used to sample.")
     parser.add_argument(
-        "--sample_steps", type=int, default=None, help="The sampling steps.")
+        "--sample_steps", type=int, default=5, help="The sampling steps.")
     parser.add_argument(
         "--sample_shift",
         type=float,
