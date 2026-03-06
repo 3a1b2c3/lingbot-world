@@ -4,6 +4,7 @@ import math
 import os
 import random
 import sys
+import time
 import types
 from contextlib import contextmanager
 from functools import partial
@@ -481,10 +482,13 @@ class WanI2V:
                     sample_guide_scale = guide_scale[1] if _t_val >= boundary else guide_scale[0]
 
                     # Single batched forward for cond + uncond
+                    pbar.set_postfix(t=f'{_t_val:.0f}', model=_model_name, status='fwd')
+                    _fwd_t0 = time.time()
                     noise_preds = model(
                         [latent_on_device, latent_on_device],
                         t=timestep.expand(2),
                         **arg_batched)
+                    tqdm.write(f'  [step t={_t_val:.0f}] model fwd: {time.time()-_fwd_t0:.1f}s')
                     noise_pred_cond   = noise_preds[0]
                     noise_pred_uncond = noise_preds[1]
                     if offload_model:
