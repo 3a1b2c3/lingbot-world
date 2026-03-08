@@ -15,6 +15,7 @@ os.environ['TORCHDYNAMO_DISABLE'] = '1'
 warnings.filterwarnings('ignore')
 
 import random
+import psutil
 
 import torch
 import torch.distributed as dist
@@ -379,7 +380,7 @@ def vbench_batch(args):
     stats_path = os.path.join(os.path.dirname(out_dir), 'vbench_stats.csv')
     stats_f    = open(stats_path, 'w', newline='', encoding='utf-8')
     stats_w    = csv.writer(stats_f)
-    stats_w.writerow(['task_idx', 'prompt', 'sample_idx', 'duration_s', 'gen_fps', 'out_path', 'status'])
+    stats_w.writerow(['task_idx', 'prompt', 'sample_idx', 'duration_s', 'gen_fps', 'ram_gb', 'vram_gb', 'out_path', 'status'])
 
     if not os.path.isfile(info_json):
         print(f'[vbench] ERROR: info JSON not found: {info_json}'); return
@@ -431,11 +432,12 @@ def vbench_batch(args):
         img = Image.open(image_path).convert("RGB")
 
         for sample_idx in range(args.num_samples):
-            out_path = os.path.join(out_dir, f'{_safe(prompt)}-{sample_idx}.mp4')
+            seed = args.base_seed + sample_idx
+            out_path = os.path.join(out_dir, f'{_safe(prompt)}-{sample_idx}-{seed}.mp4')
             if os.path.exists(out_path):
                 skipped += 1
                 done += 1
-                stats_w.writerow([task_idx, prompt, sample_idx, '', '', out_path, 'skipped'])
+                stats_w.writerow([task_idx, prompt, sample_idx, '', '', '', '', out_path, 'skipped'])
                 stats_f.flush()
                 continue
 
@@ -445,7 +447,6 @@ def vbench_batch(args):
                 secs_left = (time.time() - t_start) / done * (total - done)
                 eta = f'  ETA {int(secs_left//3600):02d}h{int(secs_left%3600//60):02d}m{int(secs_left%60):02d}s'
             print(f'[vbench] [{done+1}/{total}  {pct:.0f}%{eta}]  prompt {task_idx+1}/{len(prompts)}  sample {sample_idx+1}/{args.num_samples}: {prompt[:50]}')
-            seed = args.base_seed + sample_idx
             try:
                 with torch.inference_mode():
                     t0 = time.time()
@@ -463,16 +464,21 @@ def vbench_batch(args):
                     elapsed = time.time() - t0
                 frame_num = args.frame_num
                 gen_fps = frame_num / elapsed if elapsed > 0 else 0.0
+                ram_gb  = psutil.virtual_memory().used / 1024**3
+                vram_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
                 from wan.utils.utils import save_video as _save_video
                 _save_video(tensor=video[None], save_file=out_path, fps=cfg.sample_fps,
                             nrow=1, normalize=True, value_range=(-1, 1))
                 print(f'[vbench] saved {out_path}  ({gen_fps:.1f} gen-fps)')
-                stats_w.writerow([task_idx, prompt, sample_idx, f'{elapsed:.2f}', f'{gen_fps:.2f}', out_path, 'ok'])
+                stats_w.writerow([task_idx, prompt, sample_idx, f'{elapsed:.2f}', f'{gen_fps:.2f}',
+                                  f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, 'ok'])
                 stats_f.flush()
                 generated += 1
             except Exception as exc:
                 print(f'[vbench] ERROR task {task_idx} sample {sample_idx}: {exc}')
-                stats_w.writerow([task_idx, prompt, sample_idx, '', '', out_path, 'error'])
+                ram_gb  = psutil.virtual_memory().used / 1024**3
+                vram_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+                stats_w.writerow([task_idx, prompt, sample_idx, '', '', f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, 'error'])
                 stats_f.flush()
                 errors += 1
             done += 1
