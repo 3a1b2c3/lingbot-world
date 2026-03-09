@@ -12,6 +12,10 @@ from datetime import datetime
 # Disable torch compile to avoid inductor import errors
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
 
+# A40 (Ampere/sm_86): use expandable segments to reduce fragmentation across
+# many sequential video generations
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 warnings.filterwarnings('ignore')
 
 import random
@@ -19,6 +23,11 @@ import psutil
 
 import torch
 import torch.distributed as dist
+
+# A40: enable TF32 for matmuls (~3× faster than FP32, Ampere feature)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('high')
 from PIL import Image
 
 import wan
@@ -202,9 +211,9 @@ def _parse_args():
         help="Classifier free guidance scale.")
     parser.add_argument(
         "--convert_model_dtype",
-        action="store_true",
-        default=False,
-        help="Whether to convert model paramerters dtype.")
+        type=str2bool,
+        default=True,
+        help="Whether to convert model parameters to BF16 (default: True, A40 has strong BF16 support).")
     # ---- VBench batch args ----
     parser.add_argument("--vbench", action="store_true", default=True,
         help="Run VBench batch generation instead of single-video mode.")
