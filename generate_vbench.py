@@ -15,6 +15,7 @@ os.environ['TORCHDYNAMO_DISABLE'] = '1'
 warnings.filterwarnings('ignore')
 
 import random
+import traceback
 import psutil
 
 import torch
@@ -405,17 +406,31 @@ def vbench_batch(args):
     print(f'[vbench] {len(prompts)} prompts × {args.num_samples} samples = {len(prompts) * args.num_samples} total')
 
     cfg = WAN_CONFIGS[args.task]
-    wan_i2v = wan.WanI2V(
-        config=cfg,
-        checkpoint_dir=args.ckpt_dir,
-        device_id=0,
-        rank=0,
-        t5_fsdp=False,
-        dit_fsdp=False,
-        use_sp=False,
-        t5_cpu=args.t5_cpu,
-        convert_model_dtype=args.convert_model_dtype,
-    )
+
+    if torch.cuda.is_available():
+        free_gb, total_gb = [x / 1024**3 for x in torch.cuda.mem_get_info()]
+        print(f'[vbench] VRAM before model load: {free_gb:.1f} GB free / {total_gb:.1f} GB total')
+    print(f'[vbench] loading WanI2V from {args.ckpt_dir} ...')
+    try:
+        wan_i2v = wan.WanI2V(
+            config=cfg,
+            checkpoint_dir=args.ckpt_dir,
+            device_id=0,
+            rank=0,
+            t5_fsdp=False,
+            dit_fsdp=False,
+            use_sp=False,
+            t5_cpu=args.t5_cpu,
+            convert_model_dtype=args.convert_model_dtype,
+        )
+    except Exception as exc:
+        print(f'[vbench] FATAL: model load failed — {type(exc).__name__}: {exc}')
+        traceback.print_exc()
+        stats_f.close()
+        return
+    if torch.cuda.is_available():
+        free_gb, total_gb = [x / 1024**3 for x in torch.cuda.mem_get_info()]
+        print(f'[vbench] VRAM after  model load: {free_gb:.1f} GB free / {total_gb:.1f} GB total')
 
     skipped = generated = errors = 0
     total   = len(prompts) * args.num_samples
@@ -446,7 +461,13 @@ def vbench_batch(args):
             if done > 0:
                 secs_left = (time.time() - t_start) / done * (total - done)
                 eta = f'  ETA {int(secs_left//3600):02d}h{int(secs_left%3600//60):02d}m{int(secs_left%60):02d}s'
-            print(f'[vbench] [{done+1}/{total}  {pct:.0f}%{eta}]  prompt {task_idx+1}/{len(prompts)}  sample {sample_idx+1}/{args.num_samples}: {prompt[:50]}')
+            vram_free = torch.cuda.mem_get_info()[0] / 1024**3 if torch.cuda.is_available() else 0.0
+            print(f'[vbench] [{done+1}/{total}  {pct:.0f}%{eta}]  prompt {task_idx+1}/{len(prompts)}  sample {sample_idx+1}/{args.num_samples}  VRAM free {vram_free:.1f} GB')
+            print(f'[vbench]   image : {image_name}')
+            print(f'[vbench]   prompt: {prompt[:120]}')
+            print(f'[vbench]   seed  : {seed}  out: {os.path.basename(out_path)}')
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             try:
                 with torch.inference_mode():
                     t0 = time.time()
@@ -462,22 +483,27 @@ def vbench_batch(args):
                         offload_model=args.offload_model,
                     )
                     elapsed = time.time() - t0
-                gen_fps = args.frame_num / elapsed if elapsed > 0 else 0.0
-                ram_gb  = psutil.virtual_memory().used / 1024**3
-                vram_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+                gen_fps    = args.frame_num / elapsed if elapsed > 0 else 0.0
+                ram_gb     = psutil.virtual_memory().used / 1024**3
+                vram_gb    = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+                vram_peak  = torch.cuda.max_memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
                 from wan.utils.utils import save_video as _save_video
                 _save_video(tensor=video[None], save_file=out_path, fps=cfg.sample_fps,
                             nrow=1, normalize=True, value_range=(-1, 1))
-                print(f'[vbench] saved {out_path}  ({gen_fps:.1f} gen-fps)')
+                print(f'[vbench]   OK  {elapsed:.1f}s  {gen_fps:.2f} gen-fps  VRAM {vram_gb:.1f} GB (peak {vram_peak:.1f} GB)  RAM {ram_gb:.1f} GB')
                 stats_w.writerow([task_idx, prompt, sample_idx, f'{elapsed:.2f}', f'{gen_fps:.2f}',
                                   f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, 'ok'])
                 stats_f.flush()
                 generated += 1
             except Exception as exc:
-                print(f'[vbench] ERROR task {task_idx} sample {sample_idx}: {exc}')
                 ram_gb  = psutil.virtual_memory().used / 1024**3
                 vram_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
-                stats_w.writerow([task_idx, prompt, sample_idx, '', '', f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, 'error'])
+                print(f'[vbench]   ERROR task {task_idx} sample {sample_idx}: {type(exc).__name__}: {exc}')
+                print(f'[vbench]   image_path: {image_path}')
+                print(f'[vbench]   out_path  : {out_path}')
+                print(f'[vbench]   RAM {ram_gb:.1f} GB  VRAM {vram_gb:.1f} GB')
+                traceback.print_exc()
+                stats_w.writerow([task_idx, prompt, sample_idx, '', '', f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, f'error:{type(exc).__name__}'])
                 stats_f.flush()
                 errors += 1
             done += 1
