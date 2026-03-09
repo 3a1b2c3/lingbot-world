@@ -412,18 +412,35 @@ def vbench_batch(args):
         seen.add(name)
         prompts.append((name, e['prompt_en']))
 
+    if args.offload_model is None:
+        args.offload_model = False
+    print(f'[vbench] offload_model={args.offload_model}  t5_cpu={args.t5_cpu}  convert_model_dtype={args.convert_model_dtype}')
+
     cfg = WAN_CONFIGS[args.task]
-    wan_i2v = wan.WanI2V(
-        config=cfg,
-        checkpoint_dir=args.ckpt_dir,
-        device_id=0,
-        rank=0,
-        t5_fsdp=False,
-        dit_fsdp=False,
-        use_sp=False,
-        t5_cpu=args.t5_cpu,
-        convert_model_dtype=args.convert_model_dtype,
-    )
+    if torch.cuda.is_available():
+        free_gb, total_gb = [x / 1024**3 for x in torch.cuda.mem_get_info()]
+        print(f'[vbench] VRAM before model load: {free_gb:.1f}GB free / {total_gb:.1f}GB total')
+    print(f'[vbench] loading WanI2V from {args.ckpt_dir} ...')
+    try:
+        wan_i2v = wan.WanI2V(
+            config=cfg,
+            checkpoint_dir=args.ckpt_dir,
+            device_id=0,
+            rank=0,
+            t5_fsdp=False,
+            dit_fsdp=False,
+            use_sp=False,
+            t5_cpu=args.t5_cpu,
+            convert_model_dtype=args.convert_model_dtype,
+        )
+    except Exception as exc:
+        print(f'[vbench] FATAL: model load failed — {type(exc).__name__}: {exc}')
+        traceback.print_exc()
+        return
+    if torch.cuda.is_available():
+        used_gb = torch.cuda.memory_allocated() / 1024**3
+        free_gb = torch.cuda.mem_get_info()[0] / 1024**3
+        print(f'[vbench] model loaded — VRAM used {used_gb:.1f}GB  free {free_gb:.1f}GB')
 
     skipped = generated = errors = 0
     total   = len(prompts) * args.num_samples
