@@ -114,7 +114,7 @@ def _parse_args():
     parser.add_argument(
         "--offload_model",
         type=str2bool,
-        default=None,
+        default=True,
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage.")
     parser.add_argument(
         "--ulysses_size",
@@ -129,7 +129,7 @@ def _parse_args():
     parser.add_argument(
         "--t5_cpu",
         action="store_true",
-        default=False,
+        default=True,
         help="Whether to place T5 model on CPU.")
     parser.add_argument(
         "--dit_fsdp",
@@ -253,7 +253,7 @@ def generate(args):
     logging.info("Starting the generation process...")
     
     if args.offload_model is None:
-        args.offload_model = False
+        args.offload_model = True
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
     if world_size > 1:
