@@ -1,4 +1,4 @@
-import argparse
+pythimport argparse
 import csv
 import json
 import logging
@@ -516,6 +516,9 @@ def vbench_batch(args):
                 stats_w.writerow([task_idx, prompt, sample_idx, '', '', f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, f'error:{type(exc).__name__}'])
                 stats_f.flush()
                 errors += 1
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                import gc; gc.collect()
             done += 1
 
     elapsed_total = time.time() - t_start
