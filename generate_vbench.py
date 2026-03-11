@@ -433,10 +433,15 @@ def vbench_batch(args):
         print(f'[vbench] VRAM after  model load: {free_gb:.1f} GB free / {total_gb:.1f} GB total')
 
     skipped = generated = errors = 0
-    total   = len(prompts) * args.num_samples
-    done    = 0
-    t_start = time.time()
+    total      = len(prompts) * args.num_samples
+    done       = 0
+    ok_total_s = 0.0
+    t_start    = time.time()
     print(f'[vbench] {len(prompts)} prompts × {args.num_samples} samples = {total} total')
+
+    def _fmt(secs):
+        h, m, s = int(secs//3600), int(secs%3600//60), int(secs%60)
+        return f'{h:02d}h{m:02d}m{s:02d}s'
 
     for task_idx, (image_name, prompt) in enumerate(prompts):
         image_path = os.path.join(image_dir, image_name)
@@ -456,13 +461,17 @@ def vbench_batch(args):
                 stats_f.flush()
                 continue
 
-            pct = 100 * done / total if total else 0
-            eta = ''
-            if done > 0:
-                secs_left = (time.time() - t_start) / done * (total - done)
-                eta = f'  ETA {int(secs_left//3600):02d}h{int(secs_left%3600//60):02d}m{int(secs_left%60):02d}s'
+            pct     = 100 * done / total if total else 0
+            elapsed = time.time() - t_start
+            eta = avg = ''
+            if generated > 0:
+                avg_s     = ok_total_s / generated
+                secs_left = avg_s * (total - done)
+                eta = f'  ETA {_fmt(secs_left)}'
+                avg = f'  avg {avg_s/60:.1f}min/video'
             vram_free = torch.cuda.mem_get_info()[0] / 1024**3 if torch.cuda.is_available() else 0.0
-            print(f'[vbench] [{done+1}/{total}  {pct:.0f}%{eta}]  prompt {task_idx+1}/{len(prompts)}  sample {sample_idx+1}/{args.num_samples}  VRAM free {vram_free:.1f} GB')
+            print(f'\n[vbench] [{done+1}/{total}  {pct:.0f}%{eta}{avg}]  elapsed {_fmt(elapsed)}')
+            print(f'[vbench] prompt {task_idx+1}/{len(prompts)}  sample {sample_idx+1}/{args.num_samples}  seed {seed}  VRAM free {vram_free:.1f} GB')
             print(f'[vbench]   image : {image_name}')
             print(f'[vbench]   prompt: {prompt[:120]}')
             print(f'[vbench]   seed  : {seed}  out: {os.path.basename(out_path)}')
@@ -494,7 +503,8 @@ def vbench_batch(args):
                 stats_w.writerow([task_idx, prompt, sample_idx, f'{elapsed:.2f}', f'{gen_fps:.2f}',
                                   f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, 'ok'])
                 stats_f.flush()
-                generated += 1
+                ok_total_s += elapsed
+                generated  += 1
             except Exception as exc:
                 ram_gb  = psutil.virtual_memory().used / 1024**3
                 vram_gb = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
@@ -510,7 +520,9 @@ def vbench_batch(args):
 
     elapsed_total = time.time() - t_start
     stats_f.close()
-    print(f'\n[vbench] done — generated={generated}  skipped={skipped}  errors={errors}  elapsed={elapsed_total/60:.1f}m')
+    print(f'\n[vbench] done — generated={generated}  skipped={skipped}  errors={errors}  elapsed={_fmt(elapsed_total)}')
+    if generated:
+        print(f'[vbench] avg per video: {ok_total_s/generated/60:.1f} min')
     print(f'[vbench] stats → {stats_path}')
 
 
