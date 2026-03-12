@@ -1,4 +1,4 @@
-pythimport argparse
+import argparse
 import csv
 import json
 import logging
@@ -11,6 +11,7 @@ from datetime import datetime
 
 # Disable torch compile to avoid inductor import errors
 os.environ['TORCHDYNAMO_DISABLE'] = '1'
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
 warnings.filterwarnings('ignore')
 
@@ -96,7 +97,7 @@ def _parse_args():
     parser.add_argument(
         "--size",
         type=str,
-        default="720*1280",
+        default="720*960",
         choices=list(SIZE_CONFIGS.keys()),
         help="The area (width*height) of the generated video. For the I2V task, the aspect ratio of the output video will follow that of the input image."
     )
@@ -519,6 +520,15 @@ def vbench_batch(args):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 import gc; gc.collect()
+                try:
+                    for attr in ('low_noise_model', 'high_noise_model'):
+                        m = getattr(wan_i2v, attr, None)
+                        if m is not None:
+                            m.to('cpu')
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
             done += 1
 
     elapsed_total = time.time() - t_start
