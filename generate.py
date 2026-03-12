@@ -58,6 +58,9 @@ def _validate_args(args):
     if args.frame_num is None:
         args.frame_num = cfg.frame_num
 
+    if args.low_res:
+        args.size = "832*480"
+
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
     # Size check
@@ -191,6 +194,11 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to convert model paramerters dtype.")
+    parser.add_argument(
+        "--low_res",
+        action="store_true",
+        default=True,
+        help="Use 832*480 resolution instead of the default.")
     parser.add_argument(
         "--overlay_actions",
         action="store_true",
