@@ -117,7 +117,7 @@ def _parse_args():
     parser.add_argument(
         "--t5_cpu",
         action="store_true",
-        default=False,
+        default=True,
         help="Whether to place T5 model on CPU.")
     parser.add_argument(
         "--dit_fsdp",
