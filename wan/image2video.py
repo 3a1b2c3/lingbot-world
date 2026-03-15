@@ -241,7 +241,8 @@ class WanI2V:
                  guide_scale=5.0,
                  n_prompt="",
                  seed=-1,
-                 offload_model=True):
+                 offload_model=True,
+                 _cache=None):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
 
@@ -337,18 +338,24 @@ class WanI2V:
             n_prompt = self.sample_neg_prompt
 
         # preprocess
-        logging.info("Encoding prompt with T5 ...")
-        if not self.t5_cpu:
-            self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
-                self.text_encoder.model.cpu()
+        if _cache is not None and 'context' in _cache:
+            context, context_null = _cache['context'], _cache['context_null']
         else:
-            context = self.text_encoder([input_prompt], torch.device('cpu'))
-            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+            logging.info("Encoding prompt with T5 ...")
+            if not self.t5_cpu:
+                self.text_encoder.model.to(self.device)
+                context = self.text_encoder([input_prompt], self.device)
+                context_null = self.text_encoder([n_prompt], self.device)
+                if offload_model:
+                    self.text_encoder.model.cpu()
+            else:
+                context = self.text_encoder([input_prompt], torch.device('cpu'))
+                context_null = self.text_encoder([n_prompt], torch.device('cpu'))
+                context = [t.to(self.device) for t in context]
+                context_null = [t.to(self.device) for t in context_null]
+            if _cache is not None:
+                _cache['context'] = context
+                _cache['context_null'] = context_null
 
         # cam preparation (only if action_path is provided)
         dit_cond_dict = None
@@ -407,15 +414,20 @@ class WanI2V:
                 "c2ws_plucker_emb": c2ws_plucker_emb.chunk(1, dim=0),
             }
 
-        logging.info(f"VAE encoding image  (lat {lat_f}×{lat_h}×{lat_w}) ...")
-        y = self.vae.encode([
-            torch.concat([
-                torch.nn.functional.interpolate(
-                    img[None], size=(h, w), mode='bicubic').transpose(0, 1),
-                torch.zeros(3, F - 1, h, w, device=self.device)
-            ], dim=1)
-        ])[0]
-        y = torch.concat([msk, y])
+        if _cache is not None and 'y' in _cache:
+            y = _cache['y']
+        else:
+            logging.info(f"VAE encoding image  (lat {lat_f}×{lat_h}×{lat_w}) ...")
+            y = self.vae.encode([
+                torch.concat([
+                    torch.nn.functional.interpolate(
+                        img[None], size=(h, w), mode='bicubic').transpose(0, 1),
+                    torch.zeros(3, F - 1, h, w, device=self.device)
+                ], dim=1)
+            ])[0]
+            y = torch.concat([msk, y])
+            if _cache is not None:
+                _cache['y'] = y
 
         @contextmanager
         def noop_no_sync():

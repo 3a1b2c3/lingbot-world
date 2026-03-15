@@ -115,7 +115,7 @@ def _parse_args():
     parser.add_argument(
         "--offload_model",
         type=str2bool,
-        default=True,
+        default=False,
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage.")
     parser.add_argument(
         "--ulysses_size",
@@ -480,6 +480,7 @@ def vbench_batch(args):
             continue
 
         img = Image.open(image_path).convert("RGB")
+        prompt_cache = {}
 
         for sample_idx in range(args.num_samples):
             seed = args.base_seed + sample_idx
@@ -520,6 +521,7 @@ def vbench_batch(args):
                         guide_scale=args.sample_guide_scale or cfg.sample_guide_scale,
                         seed=seed,
                         offload_model=args.offload_model,
+                        _cache=prompt_cache,
                     )
                     elapsed = time.time() - t0
                 gen_fps    = args.frame_num / elapsed if elapsed > 0 else 0.0
