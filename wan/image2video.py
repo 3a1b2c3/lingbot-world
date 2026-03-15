@@ -52,6 +52,7 @@ class WanI2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        quantization_config=None,
     ):
         r"""
         Initializes the image-to-video generation model components.
@@ -91,6 +92,8 @@ class WanI2V:
 
         if t5_fsdp or dit_fsdp or use_sp:
             self.init_on_cpu = False
+        if quantization_config is not None:
+            self.init_on_cpu = False  # bitsandbytes quantized models must load on GPU
 
         if 'cam' in checkpoint_dir:
             self.control_type = 'cam'
@@ -119,9 +122,10 @@ class WanI2V:
         _orig_reset = nn.Linear.reset_parameters
         nn.Linear.reset_parameters = lambda self: None
         try:
+            _quant_kwargs = {"quantization_config": quantization_config} if quantization_config is not None else {}
             logging.info(f"Loading low_noise_model from {checkpoint_dir}/{config.low_noise_checkpoint} ...")
             self.low_noise_model = WanModel.from_pretrained(
-                checkpoint_dir, subfolder=config.low_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
+                checkpoint_dir, subfolder=config.low_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type, **_quant_kwargs)
             self.low_noise_model = self._configure_model(
                 model=self.low_noise_model,
                 use_sp=use_sp,
@@ -131,7 +135,7 @@ class WanI2V:
 
             logging.info(f"Loading high_noise_model from {checkpoint_dir}/{config.high_noise_checkpoint} ...")
             self.high_noise_model = WanModel.from_pretrained(
-                checkpoint_dir, subfolder=config.high_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type)
+                checkpoint_dir, subfolder=config.high_noise_checkpoint, torch_dtype=torch.bfloat16, control_type=self.control_type, **_quant_kwargs)
             self.high_noise_model = self._configure_model(
                 model=self.high_noise_model,
                 use_sp=use_sp,

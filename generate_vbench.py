@@ -104,7 +104,7 @@ def _parse_args():
     parser.add_argument(
         "--frame_num",
         type=int,
-        default=161,
+        default=81,
         help="How many frames of video are generated. The number should be 4n+1 (default: 81)"
     )
     parser.add_argument(
@@ -222,6 +222,19 @@ def _parse_args():
         help="Path to VBench crop directory.")
     parser.add_argument("--resolution", type=str, default="1-1",
         help="Crop resolution subfolder.")
+    parser.add_argument("--stats_file", type=str, default=None,
+        help="CSV stats output path (default: <vbench_output_dir>/../vbench_stats.csv).")
+    parser.add_argument("--max_prompts", type=int, default=None,
+        help="Limit number of prompts processed (default: all).")
+    parser.add_argument("--start_prompt", type=int, default=0,
+        help="Start from this prompt index (0-based), skipping earlier ones.")
+    parser.add_argument("--skip_existing", action="store_true", default=True,
+        help="Skip videos that already exist on disk (default: True).")
+    parser.add_argument("--no_skip_existing", action="store_false", dest="skip_existing")
+    parser.add_argument("--nf4", action="store_true", default=True,
+        help="Load DiT models in NF4 (4-bit) quantization via bitsandbytes. Reduces each model from ~35 GB to ~9 GB VRAM.")
+    parser.add_argument("--no_nf4", action="store_false", dest="nf4",
+        help="Disable NF4 quantization (requires ~35 GB VRAM per model).")
 
     args = parser.parse_args()
     if args.vbench:
@@ -379,7 +392,7 @@ def vbench_batch(args):
     out_dir   = os.path.abspath(args.vbench_output_dir)
     os.makedirs(out_dir, exist_ok=True)
 
-    stats_path = os.path.join(os.path.dirname(out_dir), 'vbench_stats.csv')
+    stats_path = os.path.abspath(args.stats_file) if args.stats_file else os.path.join(os.path.dirname(out_dir), 'vbench_stats.csv')
     stats_f    = open(stats_path, 'w', newline='', encoding='utf-8')
     stats_w    = csv.writer(stats_f)
     stats_w.writerow(['task_idx', 'prompt', 'sample_idx', 'duration_s', 'gen_fps', 'ram_gb', 'vram_gb', 'out_path', 'status'])
@@ -403,6 +416,10 @@ def vbench_batch(args):
         if populate is not None and (e.get('image_type') in _POPULATED_TYPES) != populate: continue
         seen.add(name)
         prompts.append((name, e['prompt_en']))
+    if args.start_prompt:
+        prompts = prompts[args.start_prompt:]
+    if args.max_prompts is not None:
+        prompts = prompts[:args.max_prompts]
 
     print(f'[vbench] {len(prompts)} prompts × {args.num_samples} samples = {len(prompts) * args.num_samples} total')
 
@@ -411,6 +428,17 @@ def vbench_batch(args):
     if torch.cuda.is_available():
         free_gb, total_gb = [x / 1024**3 for x in torch.cuda.mem_get_info()]
         print(f'[vbench] VRAM before model load: {free_gb:.1f} GB free / {total_gb:.1f} GB total')
+    quantization_config = None
+    if args.nf4:
+        from diffusers import BitsAndBytesConfig
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        print(f'[vbench] NF4 quantization enabled — models will load in ~9 GB VRAM each')
+
     print(f'[vbench] loading WanI2V from {args.ckpt_dir} ...')
     try:
         wan_i2v = wan.WanI2V(
@@ -418,11 +446,12 @@ def vbench_batch(args):
             checkpoint_dir=args.ckpt_dir,
             device_id=0,
             rank=0,
-            t5_fsdp=False,
-            dit_fsdp=False,
-            use_sp=False,
+            t5_fsdp=args.t5_fsdp,
+            dit_fsdp=args.dit_fsdp,
+            use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            quantization_config=quantization_config,
         )
     except Exception as exc:
         print(f'[vbench] FATAL: model load failed — {type(exc).__name__}: {exc}')
@@ -455,7 +484,7 @@ def vbench_batch(args):
         for sample_idx in range(args.num_samples):
             seed = args.base_seed + sample_idx
             out_path = os.path.join(out_dir, f'{_safe(prompt)}-{sample_idx}-{seed}.mp4')
-            if os.path.exists(out_path):
+            if args.skip_existing and os.path.exists(out_path):
                 skipped += 1
                 done += 1
                 stats_w.writerow([task_idx, prompt, sample_idx, '', '', '', '', out_path, 'skipped'])
