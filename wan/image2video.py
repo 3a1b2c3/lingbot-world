@@ -459,14 +459,6 @@ class WanI2V:
             # sample videos
             latent = noise
 
-            # Build batched cond+uncond args once (camera emb [1,seq,C] broadcasts over batch=2)
-            arg_batched = {
-                'context': [context[0], context_null[0]],
-                'seq_len': max_seq_len,
-                'y': [y, y],
-                'dit_cond_dict': dit_cond_dict,
-            }
-
             if offload_model:
                 torch.cuda.empty_cache()
 
@@ -485,16 +477,26 @@ class WanI2V:
                         _t_val, boundary, offload_model)
                     sample_guide_scale = guide_scale[1] if _t_val >= boundary else guide_scale[0]
 
-                    # Single batched forward for cond + uncond
+                    # Sequential cond then uncond to halve peak activation memory
                     pbar.set_postfix(t=f'{_t_val:.0f}', model=_model_name, status='fwd')
                     _fwd_t0 = time.time()
-                    noise_preds = model(
-                        [latent_on_device, latent_on_device],
-                        t=timestep.expand(2),
-                        **arg_batched)
+                    noise_pred_cond = model(
+                        [latent_on_device],
+                        t=timestep,
+                        context=[context[0]],
+                        seq_len=max_seq_len,
+                        y=[y],
+                        dit_cond_dict=dit_cond_dict,
+                    )[0]
+                    noise_pred_uncond = model(
+                        [latent_on_device],
+                        t=timestep,
+                        context=[context_null[0]],
+                        seq_len=max_seq_len,
+                        y=[y],
+                        dit_cond_dict=dit_cond_dict,
+                    )[0]
                     tqdm.write(f'  [step t={_t_val:.0f}] model fwd: {time.time()-_fwd_t0:.1f}s')
-                    noise_pred_cond   = noise_preds[0]
-                    noise_pred_uncond = noise_preds[1]
                     if offload_model:
                         torch.cuda.empty_cache()
                     noise_pred = noise_pred_uncond + sample_guide_scale * (
