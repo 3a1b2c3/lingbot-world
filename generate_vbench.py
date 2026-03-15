@@ -104,8 +104,8 @@ def _parse_args():
     parser.add_argument(
         "--frame_num",
         type=int,
-        default=81,
-        help="How many frames of video are generated. The number should be 4n+1 (default: 81)"
+        default=161,
+        help="How many frames of video are generated. The number should be 4n+1 (default: 161)"
     )
     parser.add_argument(
         "--ckpt_dir",
