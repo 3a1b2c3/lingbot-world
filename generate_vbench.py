@@ -115,7 +115,7 @@ def _parse_args():
     parser.add_argument(
         "--offload_model",
         type=str2bool,
-        default=False,
+        default=True,
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage.")
     parser.add_argument(
         "--ulysses_size",
