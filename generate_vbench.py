@@ -37,6 +37,7 @@ def _safe(s):
     return re.sub(r'[<>:"/\\|?*]', "_", s)[:150]
 
 
+
 EXAMPLE_PROMPT = {
     "i2v-A14B": {
         "prompt":
@@ -513,6 +514,7 @@ def vbench_batch(args):
                     t0 = time.time()
                     video = wan_i2v.generate(
                         prompt, img,
+                        action_path=args.action_path,
                         max_area=MAX_AREA_CONFIGS[args.size],
                         frame_num=args.frame_num,
                         shift=args.sample_shift or cfg.sample_shift,

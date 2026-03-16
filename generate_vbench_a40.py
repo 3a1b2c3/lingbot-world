@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import time
 import traceback
 import warnings
@@ -43,6 +44,32 @@ _DEFAULT_INFO_JSON = os.path.join(_VBENCH_ROOT, "vbench2_i2v_full_info.json")
 _DEFAULT_CROP_DIR  = os.path.join(_VBENCH_ROOT, "vbench2_beta_i2v", "data", "crop")
 def _safe(s):
     return re.sub(r'[<>:"/\\|?*]', "_", s)[:150]
+
+
+def _make_random_action_dir(frame_num: int, seed: int, tmpdir: str) -> str:
+    """Write random WASD action, identity poses, and standard intrinsics to tmpdir."""
+    rng = np.random.default_rng(seed)
+
+    # action: [N, 4] int32, pick one key to hold (or none) for the entire clip
+    action = np.zeros((frame_num, 4), dtype=np.int32)
+    choice = rng.integers(0, 5)  # 0=W 1=A 2=S 3=D 4=none
+    if choice < 4:
+        action[:, choice] = 1
+
+    # poses: identity c2w for all frames [N, 4, 4]
+    poses = np.tile(np.eye(4, dtype=np.float32), (frame_num, 1, 1))
+
+    # intrinsics: [fx, fy, cx, cy] for 480×832 source image
+    fx = fy = 416.0
+    cx, cy = 416.0, 240.0
+    intrinsics = np.tile(
+        np.array([fx, fy, cx, cy], dtype=np.float32), (frame_num, 1)
+    )
+
+    np.save(os.path.join(tmpdir, "action.npy"), action)
+    np.save(os.path.join(tmpdir, "poses.npy"), poses)
+    np.save(os.path.join(tmpdir, "intrinsics.npy"), intrinsics)
+    return tmpdir
 
 
 EXAMPLE_PROMPT = {
@@ -230,6 +257,8 @@ def _parse_args():
         help="Path to VBench crop directory.")
     parser.add_argument("--resolution", type=str, default="1-1",
         help="Crop resolution subfolder.")
+    parser.add_argument("--random_action", action="store_true", default=False,
+        help="Generate random WASD action conditioning per sample (requires act checkpoint).")
 
     args = parser.parse_args()
     if args.vbench:
@@ -479,10 +508,21 @@ def vbench_batch(args):
             print(f'[vbench]   prompt: {prompt[:120]}')
             print(f'[vbench]   seed  : {seed}  out: {os.path.basename(out_path)}')
             try:
+                action_path = None
+                _tmpdir = None
+                if args.random_action and hasattr(wan_i2v, 'control_type') and wan_i2v.control_type == 'act':
+                    _tmpdir = tempfile.mkdtemp()
+                    action_path = _make_random_action_dir(args.frame_num, seed, _tmpdir)
+                    key_names = ['W', 'A', 'S', 'D', 'none']
+                    pressed = np.load(os.path.join(_tmpdir, 'action.npy'))
+                    key_idx = int(np.argmax(pressed[0])) if pressed[0].any() else 4
+                    print(f'[vbench]   action: {key_names[key_idx]}')
+
                 with torch.inference_mode():
                     t0 = time.time()
                     video = wan_i2v.generate(
                         prompt, img,
+                        action_path=action_path,
                         max_area=MAX_AREA_CONFIGS[args.size],
                         frame_num=args.frame_num,
                         shift=args.sample_shift or cfg.sample_shift,
@@ -518,6 +558,10 @@ def vbench_batch(args):
                 stats_w.writerow([task_idx, prompt, sample_idx, '', '', f'{ram_gb:.2f}', f'{vram_gb:.2f}', out_path, f'error:{type(exc).__name__}'])
                 stats_f.flush()
                 errors += 1
+            finally:
+                if _tmpdir is not None:
+                    import shutil
+                    shutil.rmtree(_tmpdir, ignore_errors=True)
             done += 1
 
     elapsed_total = time.time() - t_start
