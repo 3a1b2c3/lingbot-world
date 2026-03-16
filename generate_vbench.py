@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import warnings
 from datetime import datetime
@@ -27,6 +29,24 @@ import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
 from wan.utils.utils import merge_video_audio, save_video, str2bool
+
+
+def _make_random_action_dir(frame_num: int, seed: int) -> str:
+    """Write a random WASD action (held for the full clip) into a fresh tempdir."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    action = np.zeros((frame_num, 4), dtype=np.int32)
+    choice = rng.integers(0, 5)   # 0=W 1=A 2=S 3=D 4=none
+    if choice < 4:
+        action[:, choice] = 1
+    poses = np.tile(np.eye(4, dtype=np.float32), (frame_num, 1, 1))
+    intrinsics = np.tile(np.array([416.0, 416.0, 416.0, 240.0], dtype=np.float32), (frame_num, 1))
+    tmpdir = tempfile.mkdtemp()
+    np.save(os.path.join(tmpdir, "action.npy"), action)
+    np.save(os.path.join(tmpdir, "poses.npy"), poses)
+    np.save(os.path.join(tmpdir, "intrinsics.npy"), intrinsics)
+    key_name = ["W", "A", "S", "D", "none"][int(choice)]
+    return tmpdir, key_name
 
 
 _SCRIPT_DIR        = os.path.dirname(os.path.abspath(__file__))
@@ -509,12 +529,18 @@ def vbench_batch(args):
             print(f'[vbench]   seed  : {seed}  out: {os.path.basename(out_path)}')
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
+            _tmpdir = None
             try:
+                action_path = args.action_path
+                if action_path is None:
+                    _tmpdir, key_name = _make_random_action_dir(args.frame_num, seed)
+                    action_path = _tmpdir
+                    print(f'[vbench]   key   : {key_name}')
                 with torch.inference_mode():
                     t0 = time.time()
                     video = wan_i2v.generate(
                         prompt, img,
-                        action_path=args.action_path,
+                        action_path=action_path,
                         max_area=MAX_AREA_CONFIGS[args.size],
                         frame_num=args.frame_num,
                         shift=args.sample_shift or cfg.sample_shift,
@@ -553,6 +579,10 @@ def vbench_batch(args):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 import gc; gc.collect()
+            finally:
+                if _tmpdir is not None:
+                    shutil.rmtree(_tmpdir, ignore_errors=True)
+                    _tmpdir = None
                 try:
                     for attr in ('low_noise_model', 'high_noise_model'):
                         m = getattr(wan_i2v, attr, None)
