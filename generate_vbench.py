@@ -136,7 +136,7 @@ def _parse_args():
     parser.add_argument(
         "--offload_model",
         type=str2bool,
-        default=True,
+        default=False,
         help="Whether to offload the model to CPU after each model forward, reducing GPU memory usage.")
     parser.add_argument(
         "--ulysses_size",
@@ -579,28 +579,10 @@ def vbench_batch(args):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 import gc; gc.collect()
-                # Reload model to GPU in case offloading left weights on CPU
-                try:
-                    wan_i2v.model.to("cuda")
-                except Exception:
-                    pass
-                try:
-                    wan_i2v.vae.model.to("cuda")
-                except Exception:
-                    pass
             finally:
                 if _tmpdir is not None:
                     shutil.rmtree(_tmpdir, ignore_errors=True)
                     _tmpdir = None
-                try:
-                    for attr in ('low_noise_model', 'high_noise_model'):
-                        m = getattr(wan_i2v, attr, None)
-                        if m is not None:
-                            m.to('cpu')
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
             done += 1
 
     elapsed_total = time.time() - t_start
