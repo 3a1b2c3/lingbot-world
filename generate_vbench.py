@@ -256,6 +256,13 @@ def _parse_args():
         help="Load DiT models in NF4 (4-bit) quantization via bitsandbytes. Reduces each model from ~35 GB to ~9 GB VRAM.")
     parser.add_argument("--no_nf4", action="store_false", dest="nf4",
         help="Disable NF4 quantization (requires ~35 GB VRAM per model).")
+    # ---- WorldCache args ----
+    parser.add_argument("--worldcache", action="store_true", default=False,
+        help="Enable WorldCache denoising-step caching.")
+    parser.add_argument("--worldcache_thresh", type=float, default=0.40,
+        help="WorldCache skip threshold (relative delta of consecutive noise predictions). Default: 0.40")
+    parser.add_argument("--worldcache_warmup", type=int, default=1,
+        help="Number of warmup steps before WorldCache skipping starts. Default: 1")
 
     args = parser.parse_args()
     if args.vbench:

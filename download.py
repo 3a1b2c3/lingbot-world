@@ -6,7 +6,8 @@ if __name__ == "__main__":
     MODELS = {
         #"base-cam": "robbyant/lingbot-world-base-cam",
         "base-cam-nf4": "cahlen/lingbot-world-base-cam-nf4",
-        "base-act": "robbyant/lingbot-world-base-act"
+        "base-act": "robbyant/lingbot-world-base-act",
+        "fast": "robbyant/lingbot-world-fast",
     }
 
     # Set up argument parser
